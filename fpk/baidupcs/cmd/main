@@ -22,13 +22,26 @@ RUN_CONF="${ETC_DIR}/run.conf"
 LOG="${VAR_DIR}/app.log"
 PID_FILE="${VAR_DIR}/app.pid"
 
+# WEB_PORT 是对外端口（桌面入口固定指向它）；应用本身只听回环的 INTERNAL_PORT，
+# 由 tunnel.py 在前面做 HTTP/HTTPS 自适应，解决 https 桌面下 iframe 被混合内容拦截。
 DEFAULT_PORT="18888"
 WEB_PORT="$DEFAULT_PORT"
+INTERNAL_PORT=$((WEB_PORT + 1))
+TUNNEL_PY="${APP_DIR}/tools/tunnel.py"
+TUNNEL_PID_FILE="${VAR_DIR}/tunnel.pid"
+CERT_DIR="${VAR_DIR}/tls"
+CERT_CONF="/usr/trim/etc/network_gateway_cert.conf"
 RUN_USER="admin"
 DOWNLOAD_DIR=""
-DATA_VERSION="2"
+DATA_VERSION="3"
 
 mkdir -p "$ETC_DIR" "$VAR_DIR" "$TMP_DIR" 2>/dev/null
+
+# 上一次运行留下的选择（运行用户、是否启用隧道），status 等场景也要用
+if [ -f "$RUN_CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$RUN_CONF" 2>/dev/null || true
+fi
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $*" >> "$LOG" 2>/dev/null; }
 fail() {
@@ -135,8 +148,8 @@ write_conf() {
 # the App Center settings page (which regenerates this file).
 
 [server]
-host = "0.0.0.0"
-port = ${WEB_PORT}
+host = "$([ "${TUNNEL_MODE:-on}" = "on" ] && echo 127.0.0.1 || echo 0.0.0.0)"
+port = $([ "${TUNNEL_MODE:-on}" = "on" ] && echo "${INTERNAL_PORT}" || echo "${WEB_PORT}")
 cors_origins = ["*"]
 
 [download]
@@ -167,7 +180,7 @@ EOF
         chown "${RUN_UID}:${RUN_GID}" "$CONF" 2>/dev/null || true
     fi
     printf '%s' "$DATA_VERSION" > "$CONF_MARK" 2>/dev/null
-    printf 'RUN_USER=%s\n' "$RUN_USER" > "$RUN_CONF" 2>/dev/null
+    printf 'RUN_USER=%s\nTUNNEL_MODE=%s\n' "$RUN_USER" "${TUNNEL_MODE:-on}" > "$RUN_CONF" 2>/dev/null
     log "config written: ${CONF} (run user: ${RUN_USER})"
 }
 
@@ -210,6 +223,14 @@ sync_conf_paths() {
         -e "s#^log_dir = .*#log_dir = \"$(toml_escape "$VAR_DIR/logs")\"#" \
         "$CONF" 2>/dev/null || true
     [ -f "$RUN_CONF" ] || printf 'RUN_USER=%s\n' "$RUN_USER" > "$RUN_CONF" 2>/dev/null
+    # 端口模型：有 python3 时应用只听回环、由隧道统一对外；否则退回直连 0.0.0.0
+    if [ "${TUNNEL_MODE:-on}" = "on" ]; then
+        sed -i -e "s#^host = .*#host = \"127.0.0.1\"#" \
+               -e "s#^port = .*#port = ${INTERNAL_PORT}#" "$CONF" 2>/dev/null || true
+    else
+        sed -i -e "s#^host = .*#host = \"0.0.0.0\"#" \
+               -e "s#^port = .*#port = ${WEB_PORT}#" "$CONF" 2>/dev/null || true
+    fi
     # v1 把 allowed_paths 限在白名单内，导致下载目录选择器无法浏览；升级时放行。
     if [ "$(cat "$CONF_MARK" 2>/dev/null)" != "$DATA_VERSION" ]; then
         sed -i 's#^allowed_paths = .*#allowed_paths = []#' "$CONF" 2>/dev/null || true
@@ -228,9 +249,88 @@ is_running() {
     return 0
 }
 
+python_bin() {
+    if command -v python3 >/dev/null 2>&1; then
+        command -v python3
+    elif [ -x /var/apps/python312/target/bin/python3 ]; then
+        printf '%s' /var/apps/python312/target/bin/python3
+    fi
+}
+
+tunnel_running() {
+    [ -f "$TUNNEL_PID_FILE" ] || return 1
+    local pid
+    pid="$(head -n 1 "$TUNNEL_PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$pid" ] || return 1
+    kill -0 "$pid" 2>/dev/null || { rm -f "$TUNNEL_PID_FILE"; return 1; }
+    return 0
+}
+
+# 把飞牛托管的证书复制到应用数据目录（以 root 执行；隧道进程以应用用户读取）
+prepare_certs() {
+    local py="$1"
+    [ -n "$py" ] || return 1
+    [ -r "$CERT_CONF" ] || { log "未找到 ${CERT_CONF}，隧道将只提供 HTTP"; return 1; }
+    mkdir -p "$CERT_DIR" 2>/dev/null
+    if ! "$py" "$TUNNEL_PY" --prepare "$CERT_CONF" "$CERT_DIR" >> "$LOG" 2>&1; then
+        log "证书准备失败，隧道将只提供 HTTP"
+        return 1
+    fi
+    chmod 700 "$CERT_DIR" 2>/dev/null || true
+    if [ "$(id -u)" -eq 0 ] && [ "${RUN_UID:-0}" -ne 0 ]; then
+        chown -R "${RUN_UID}:${RUN_GID}" "$CERT_DIR" 2>/dev/null || true
+    fi
+    return 0
+}
+
 port_in_use() {
     command -v ss >/dev/null 2>&1 || return 1
     ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}$"
+}
+
+start_tunnel() {
+    local py="$1"
+    if tunnel_running; then
+        return 0
+    fi
+    if [ -z "$py" ]; then
+        log "缺少 python3，跳过隧道（仅 HTTP，可内网访问）"
+        return 1
+    fi
+    prepare_certs "$py" || true
+    log "starting tunnel on ${WEB_PORT} -> 127.0.0.1:${INTERNAL_PORT}"
+    (
+        cd "$RUNDIR" || exit 1
+        export TUNNEL_PORT="$WEB_PORT"
+        export UPSTREAM_PORT="$INTERNAL_PORT"
+        export CERT_DIR="$CERT_DIR"
+        if [ "$(id -u)" -eq 0 ] && [ "${RUN_UID:-0}" -ne 0 ]; then
+            if command -v setpriv >/dev/null 2>&1; then
+                exec setpriv --reuid "$RUN_UID" --regid "$RUN_GID" --init-groups -- "$py" "$TUNNEL_PY"
+            fi
+            exec runuser -u "$RUN_USER" -- "$py" "$TUNNEL_PY"
+        fi
+        exec "$py" "$TUNNEL_PY"
+    ) </dev/null >> "$LOG" 2>&1 &
+    echo "$!" > "$TUNNEL_PID_FILE"
+    return 0
+}
+
+stop_tunnel() {
+    [ -f "$TUNNEL_PID_FILE" ] || return 0
+    local pid i=0
+    pid="$(head -n 1 "$TUNNEL_PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        log "stopping tunnel pid=${pid}"
+        kill -TERM "$pid" 2>/dev/null || true
+        while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 10 ]; do
+            sleep 1
+            i=$((i + 1))
+        done
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$TUNNEL_PID_FILE"
+    return 0
 }
 
 start_app() {
@@ -252,6 +352,12 @@ start_app() {
     fi
     merge_wizard
     resolve_identity
+    PYTHON_BIN="$(python_bin)"
+    if [ -n "$PYTHON_BIN" ] && [ -f "$TUNNEL_PY" ]; then
+        TUNNEL_MODE="on"
+    else
+        TUNNEL_MODE="off"
+    fi
     ensure_dirs
     # first start creates the config; afterwards the user's own edits win
     if [ -f "$CONF" ]; then
@@ -282,11 +388,16 @@ start_app() {
     ) >> "$LOG" 2>&1 &
     echo "$!" > "$PID_FILE"
 
-    log "started pid=$(cat "$PID_FILE" 2>/dev/null)"
+    log "started pid=$(cat "$PID_FILE" 2>/dev/null), tunnel_mode=${TUNNEL_MODE}"
+
+    if [ "$TUNNEL_MODE" = "on" ]; then
+        start_tunnel "$PYTHON_BIN" || true
+    fi
     return 0
 }
 
 stop_app() {
+    stop_tunnel
     if [ ! -f "$PID_FILE" ]; then
         return 0
     fi
@@ -431,6 +542,10 @@ case "${1:-status}" in
         ;;
     status)
         if is_running; then
+            # 隧道挂了等于界面打不开，按未运行上报，让系统重拉
+            if [ "${TUNNEL_MODE:-on}" = "on" ] && ! tunnel_running; then
+                exit 3
+            fi
             exit 0
         fi
         exit 3

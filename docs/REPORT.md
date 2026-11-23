@@ -3,7 +3,7 @@
 - 分析对象：https://github.com/komorebiCarry/BaiduPCS-Rust （Apache-2.0，v2.4.1，最后提交 2026-11-10）
 - 依据文档：`C:\飞牛开发文档\飞牛开发文档`（developer.fnnas.com 离线镜像，fnpack V1.2.3 / 开放 API 2026-07-31 版）
 - 验证环境：fnOS 测试机 一台 x86_64 测试机，Debian 12 bookworm，x86_64，16 核 / 8 GB，glibc 2.36，Docker 28.5.2，fnpack 1.2.x，appcenter-cli 1.0.2
-- 当前包版本：`baidupcs 2.4.1-5`；结论日期：2026-11-23
+- 当前包版本：`baidupcs 2.4.1-6`；结论日期：2026-11-23
 
 ---
 
@@ -167,13 +167,34 @@ v1 把 `allowed_paths` 写成"共享目录 + 授权目录"，导致内置目录�
 > 说明：`appcenter-cli uninstall` 无法传导向导变量，会提示"请从 Web UI 卸载"，因此"卸载时选择不保留"这一交互
 > 只能在 Web UI 里点选；发布前建议在 Web UI 完整走一次。
 
+**5.13 外网访问：一份端口要同时伺候 http 与 https（已解决）**
+飞牛按 `${entry.protocol || location.protocol}` 生成 iframe 地址，所以内网（http 桌面）与外网
+（https 桌面/DDNS 域名）共用同一个图标，但协议不同。上游只说纯 HTTP，https 桌面里会被浏览器按
+混合内容拦掉；直连 `https://域名:18888` 则连 TLS 握手都失败。
+→ 采用已被同作者 `gopeed-fnos` 验证过的方案：应用改为只监听 `127.0.0.1:18889`，
+`tunnel.py` 在 18888 上窥探首字节——`0x16` 走 TLS（按 ClientHello 的 SNI 从
+`/usr/trim/etc/network_gateway_cert.conf` 里选证书），否则按 HTTP 透传；WebSocket 握手后双向透传。
+同时监听 IPv4/IPv6（DDNS 常只有 AAAA 记录）。证书由 root 在启动前复制到 `@appdata/tls`（0600）后降权读取。
+
+实测（局域网视角，非回环）：
+
+| 链路 | 结果 |
+|---|---|
+| `http://IP:18888/` | 200 |
+| `https://fnos.vinson023.eu.org:18888/` | 200，证书 `CN=fnos.vinson023.eu.org`（Let's Encrypt） |
+| `wss://…/api/v1/ws` 升级 | 101 Switching Protocols |
+| 内部端口 `18889` 从外部探测 | ConnectionRefused（仅回环，符合预期） |
+
+**仍需用户侧动作**：路由器把 TCP 18888 转发到飞牛（与 5666/5667 同理）。若坚持不开放第二个端口，
+唯一替代是统一网关模式，需改造上游（见 5.6），暂不提供。
+
 ---
 
 ## 六、风险清单
 
 | 级别 | 风险 | 说明与对策 |
 |---|---|---|
-| 高 | **HTTPS 访问下的混合内容** | 入口是 `http://host:18888`。HTTP(5666) 桌面正常；走 HTTPS/DDNS 时 iframe 会被混合内容拦截。对策：复用本机 `gopeed` 包已验证的 **HTTP/HTTPS 自适应 TLS 隧道**（Python，读 `network_gateway_cert.conf` 的 fnOS 证书），服务只听回环。约半天。 |
+| ~~高~~ → 已解决 | ~~HTTPS 访问下的混合内容~~ | 2.4.1-6 起内置 HTTP/HTTPS 自适应隧道，https 桌面与外网域名均可用（见 5.13）。剩余前提：路由器需转发 TCP 18888。 |
 | 中 | 无 NAS 登录态透传 | 端口入口不受 NAS 会话保护，同网段可直接访问。对策：首次强制设置 Web 密码（上游 `web_auth` 支持），或后续改网关模式。 |
 | 中 | 上游"Linux 不做主动测试" | README 明示主要测试 Windows 与 Docker。本次在 Debian 12 上运行正常，长期需跟随上游回归；建议锁定版本并做冒烟（登录页 200 + WS 101 + 目录可写）。 |
 | 中 | 版本跟随成本 | 上游迭代快（v2.4.1，PR #194）。`build.sh` 幂等，CI 化后单次约 5 分钟。 |
