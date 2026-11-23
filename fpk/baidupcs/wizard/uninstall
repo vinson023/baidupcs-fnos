@@ -1,0 +1,27 @@
+[
+    {
+        "stepTitle": "卸载选项",
+        "items": [
+            {
+                "type": "radio",
+                "field": "wizard_data_action",
+                "label": "是否保留配置文件",
+                "initValue": "keep",
+                "options": [
+                    {
+                        "label": "保留配置文件（推荐）",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "不保留，全部删除",
+                        "value": "purge"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "<b>保留配置文件</b>：账号登录状态、任务记录、数据库与设置都留在飞牛上，重新安装后可直接继续使用。<br><br><b>不保留</b>：删除本应用在系统中的全部配置与数据，包括 <code>@appconf</code>、<code>@appdata</code>、<code>@apphome</code>、<code>@apptemp</code>、<code>@appmeta</code> 下属于本应用的目录、日志、WAL 与临时文件，以及本应用专用的系统账号。<br><br><b>已下载到存储空间的文件不会被删除</b>；共享目录仅当其中已无任何文件时才会一并移除。"
+            }
+        ]
+    }
+]

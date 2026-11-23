@@ -1,0 +1,116 @@
+# 百度网盘 BaiduPCS for 飞牛 fnOS
+
+把 [BaiduPCS-Rust](https://github.com/komorebiCarry/BaiduPCS-Rust) 打包成飞牛 fnOS 的原生应用包（`.fpk`）。
+**纯 Native，不用 Docker**：单个 Rust 二进制 + 内嵌 Web UI，装完点桌面图标就能用。
+
+- 内置 BaiduPCS-Rust `2.4.1`（Rust + Vue 3，axum 后端，前端整包内嵌）
+- 二进制只依赖 `libc / libm / libgcc_s`，不需要 Node / Python / Java 运行时
+- 支持多账号、多线程并发下载、断点续传、文件夹与批量下载、上传与秒传、转存、分享同步、离线下载、自动备份、客户端侧加密
+- 下载文件属主 = 你选择的飞牛用户，文件管理里可正常改名、移动、删除
+- 安装向导强制设置下载目录，可选运行身份
+- 卸载时可选择 **保留** 或 **彻底清理** 配置
+
+## 安装
+
+1. 到 [Releases](../../releases) 下载 `baidupcs_<version>_x86.fpk`
+2. 飞牛「应用中心 → 手动安装」，上传该文件
+3. 按向导填写：
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| 下载目录 | 空（**必填**） | 绝对路径，如 `/vol1/1000/Downloads`；不存在会自动创建。建议新建一个专用目录 |
+| 运行用户 | `admin` | 服务以该用户运行，决定下载文件的属主与可写范围 |
+
+4. 装完点桌面图标打开，地址形如 `http://<飞牛地址>:18888`
+
+> **端口固定为 18888**：飞牛在安装时就把入口地址写进桌面图标，`${wizard_port}` 不会被替换，
+> 所以端口是构建期常量。需要别的端口请自行构建（改 `manifest` 与 `app/ui/config` 后 `bash build.sh`）。
+
+## 使用要点
+
+**首次登录**：打开应用后扫码（百度网盘 App），或粘贴浏览器 DevTools 里的 Cookie。
+
+**下载**：保存到上面填写的下载目录，可在飞牛「文件管理」里直接操作。
+
+**上传**：本应用读取的是**飞牛存储里的文件**，浏览器没有直传通道。流程是：
+
+1. 用飞牛「文件管理」上传、SMB/网络磁盘，或直接拖进共享目录，把文件放到存储空间；
+2. 打开应用 →「网盘管理」→ 右上角「上传」；
+3. 在内置文件浏览器里选中第 1 步放好的文件或文件夹（支持多选）；
+4. 选网盘目标目录与冲突策略，确定，任务进入「上传管理」页。
+
+> 下载目录本身就是很好的中转区：网盘下到 NAS、再从 NAS 传回网盘，都直接选它。
+> 上传源文件必须对运行用户可读，否则会报「上传源文件不存在或不是文件」。
+
+**改设置**：下载目录与运行用户在「应用中心 → 百度网盘 → 设置」；并发线程、分片大小、Web 访问密码、代理等在上游界面右上角「设置」。
+
+## 卸载
+
+应用中心卸载时会询问 **是否保留配置文件**：
+
+| 选项 | 行为 |
+|---|---|
+| 保留配置文件（推荐） | 账号登录状态、任务记录、数据库、日志与设置全部保留，重装后可直接继续 |
+| 不保留，全部删除 | 清空 `@appconf`、`@appdata`、`@apphome`、`@apptemp`、`@appmeta`、`@appcenter` 下属于本应用的目录，并回收应用专用系统账号 |
+
+两种情况都**不会删除你已下载的文件**；共享目录 `baidupcs/downloads` 只在其中无任何文件时才移除。
+清理过程写入 `/tmp/baidupcs-uninstall.log`。
+
+## 构建
+
+需要一台能跑 Docker 的 x86_64 Linux（开发机或飞牛设备均可）+ `fnpack`。
+
+```bash
+git clone https://github.com/vinson023/baidupcs-fnos.git
+cd baidupcs-fnos
+bash build.sh              # 产物在 build/baidupcs_<version>_x86.fpk
+bash build.sh --install    # 构建并安装到本机应用中心（仅飞牛上可用）
+```
+
+脚本会：克隆上游指定 tag → 构建前端 → 在 `rust:1.87-slim` 容器里编译后端 → 组装应用目录 → `fnpack build`。
+上游版本通过 `UPSTREAM_REF=v2.4.1 bash build.sh` 指定。
+
+仓库结构：
+
+```
+fpk/baidupcs/            应用包源目录
+├── manifest             应用元数据（版本、作者、端口、依赖）
+├── cmd/                 生命周期脚本（逻辑集中在 cmd/main）
+├── config/              privilege（运行身份）、resource（共享目录）
+├── wizard/              install / config / uninstall 表单
+└── app/ui/              桌面入口与图标
+assets/icon/             桌面图标（官方云标合成）
+assets/icon-neutral/     备用中性图标
+assets/vite.svg          浏览器标签页图标
+docs/REPORT.md           可行性分析与实现记录
+build.sh                 一键构建
+```
+
+## 实现要点
+
+上游的配置、日志、WAL 都是**相对进程工作目录**解析的，所以服务以 `CWD=$TRIM_PKGVAR` 启动，
+运行时数据全部落在 `@appdata`，升级不丢；前端放在 `exe_dir/frontend/dist` 供其自动探测。
+
+飞牛存储卷使用 Windows ACL 语义，非属主用户写入由 ACL 层裁决，因此生命周期脚本以 root 运行，
+再用 `setpriv --reuid --init-groups` 把服务降权到你指定的飞牛用户（服务进程本身不是 root）。
+
+## 已知限制
+
+- **仅 x86_64**。ARM 设备需要另出 `platform=arm` 包并交叉编译。
+- **HTTPS 桌面下会被拦**。入口是 `http://<host>:18888`，用 HTTP(5666) 打开桌面正常；
+  若通过 HTTPS/DDNS 域名访问桌面，浏览器会按混合内容拦截 iframe。需要外网使用时，
+  后续版本会内置 HTTP/HTTPS 自适应隧道（与 [gopeed-fnos](https://github.com/vinson023/gopeed-fnos) 同方案）。
+- **端口不可改**（原因见上）。
+- 端口入口不经过飞牛登录态校验，同网段可直接访问界面；需要防护请在应用「设置」里开启 Web 访问密码。
+
+## 归属与许可
+
+- 上游项目与全部业务代码：[komorebiCarry/BaiduPCS-Rust](https://github.com/komorebiCarry/BaiduPCS-Rust)，Apache-2.0
+- 本仓库仅包含飞牛 fnOS 的封装（生命周期脚本、向导、图标、构建脚本），同样以 Apache-2.0 发布，见 [LICENSE](LICENSE)
+- fnOS 封装、打包与维护：vinson023
+
+## 免责声明
+
+本项目为**第三方非官方客户端**，与百度公司无任何隶属或合作关系。
+百度网盘名称与云朵标识为百度公司商标，此处仅用于标识所连接的网盘服务。
+请遵守百度网盘服务条款，仅用于个人合法用途；使用产生的账号风险由使用者自行承担。

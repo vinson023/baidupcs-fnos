@@ -1,0 +1,57 @@
+[
+    {
+        "stepTitle": "下载目录",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "百度网盘的下载文件会保存到这里。请填写存储空间内的绝对路径，例如 /vol1/1000/Downloads 或 /vol1/@appshare/baidupcs/downloads；目录不存在时会自动创建。安装完成后也可在应用设置中修改。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_download_dir",
+                "label": "下载目录",
+                "initValue": "",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "必须设置下载目录"
+                    },
+                    {
+                        "pattern": "^/",
+                        "message": "请填写以 / 开头的绝对路径"
+                    }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "使用说明",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<b>下载</b>：文件保存到上面填写的下载目录，可在飞牛「文件管理」里直接查看。<br><br><b>上传</b>：本应用读取的是<b>飞牛存储里的文件</b>，不是直接读取你电脑上的文件。上传前请先通过「文件管理」上传、SMB 或拖拽把文件放进存储空间，再到应用里「网盘管理 → 上传」选择这些文件。<br><br>首次打开需要在应用内扫码或粘贴 Cookie 登录百度网盘账号。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "运行方式",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "客户端需要把文件写入存储空间，因此服务以一个 NAS 用户身份运行。默认使用 admin；如需改用其他用户，请填写已存在的用户名。"
+            },
+            {
+                "type": "text",
+                "field": "wizard_run_user",
+                "label": "运行用户",
+                "initValue": "admin",
+                "rules": [
+                    {
+                        "required": true,
+                        "message": "请填写运行用户"
+                    }
+                ]
+            }
+        ]
+    }
+]

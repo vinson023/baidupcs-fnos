@@ -1,0 +1,13 @@
+# 构建产物与临时目录
+.build/
+build/
+src/
+*.fpk
+
+# 应用二进制与前端产物由构建脚本生成，不入库
+fpk/baidupcs/app/bin/
+
+# 依赖与本地分析产物
+node_modules/
+.analysis/
+dist/

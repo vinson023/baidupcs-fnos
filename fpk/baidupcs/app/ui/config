@@ -1,0 +1,21 @@
+{
+    ".url": {
+        "baidupcs.main": {
+            "title": "百度网盘",
+            "desc": "BaiduPCS-Rust · 多线程下载 / 上传 / 分享同步",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "",
+            "port": "18888",
+            "url": "/",
+            "width": 1280,
+            "height": 820,
+            "allUsers": true,
+            "control": {
+                "accessPerm": "readonly",
+                "portPerm": "hidden",
+                "fullUrlPerm": "hidden"
+            }
+        }
+    }
+}

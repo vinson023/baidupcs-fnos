@@ -1,0 +1,3 @@
+#!/bin/bash
+# thin wrapper: all lifecycle logic lives in ./main
+exec "$(dirname "$0")/main" install_init "$@"

@@ -1,0 +1,37 @@
+[
+    {
+        "stepTitle": "应用设置",
+        "items": [
+            {
+                "type": "text",
+                "field": "wizard_download_dir",
+                "label": "默认下载目录",
+                "initValue": "",
+                "description": "填写绝对路径，例如 <code>/vol1/1000/Downloads</code>。<b>留空表示保持当前目录不变</b>。修改后应用会自动重启，正在进行的任务会中断但可继续。",
+                "rules": [
+                    {
+                        "pattern": "^$|^/",
+                        "message": "请填写以 / 开头的绝对路径，或留空表示不修改"
+                    }
+                ]
+            },
+            {
+                "type": "text",
+                "field": "wizard_run_user",
+                "label": "运行身份（飞牛用户）",
+                "initValue": "",
+                "description": "<b>留空表示保持当前运行身份不变</b>。该用户决定下载文件的属主与可写范围。",
+                "rules": [
+                    {
+                        "pattern": "^$|^[A-Za-z0-9_.-]{1,32}$",
+                        "message": "只能包含字母、数字、_ . -，或留空表示不修改"
+                    }
+                ]
+            },
+            {
+                "type": "tips",
+                "helpText": "并发线程数、分片大小、Web 访问密码、代理等参数请直接在网盘界面右上角的「设置」中修改，保存后立即生效。"
+            }
+        ]
+    }
+]
