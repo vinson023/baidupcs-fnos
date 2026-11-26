@@ -30,6 +30,13 @@ if [ ! -d "${SRC}/backend" ]; then
     git clone --depth 1 --branch "${UPSTREAM_REF}" "${UPSTREAM_REPO}" "${SRC}"
 fi
 
+echo "==> 2/5 给上游打补丁（登录客户端超时）"
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "需要 python3 来应用补丁" >&2
+    exit 1
+fi
+python3 "${ROOT}/tools/patch_upstream.py" "${SRC}"
+
 echo "==> 2/5 构建前端"
 if command -v npm >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
     ( cd "${SRC}/frontend" && npm ci --no-audit --no-fund && npm run build )
