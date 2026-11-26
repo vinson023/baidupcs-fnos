@@ -240,12 +240,39 @@ sync_conf_paths() {
 }
 
 # ---------- process ----------
+# 关机/断电时飞牛可能直接结束进程组而不调用 cmd/main stop，pid 文件会残留；
+# 重启后该 PID 常被其它开机进程复用。因此所有"是否在运行"的判断都必须核对
+# 进程命令行，不能只看 kill -0。
+pid_cmdline() {
+    [ -r "/proc/$1/cmdline" ] || return 1
+    tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null
+}
+
+# pid 是否属于本应用（pattern 用 case 通配）。读不到 /proc 时按"是"处理，
+# 避免在非 Linux 环境下误判。
+pid_matches() {
+    local pid="$1" pattern="$2" cmd
+    if cmd="$(pid_cmdline "$pid")"; then
+        case "$cmd" in
+            $pattern) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    return 0
+}
 is_running() {
     [ -f "$PID_FILE" ] || return 1
     local pid
     pid="$(head -n 1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null || { rm -f "$PID_FILE"; return 1; }
+    if cmd="$(pid_cmdline "$pid")"; then
+        case "$cmd" in
+            *baidu-netdisk-rust*) return 0 ;;
+            *cmd/main*)          return 0 ;;   # 刚 spawn、尚未 exec 的瞬间
+            *) rm -f "$PID_FILE"; return 1 ;;
+        esac
+    fi
     return 0
 }
 
@@ -263,6 +290,12 @@ tunnel_running() {
     pid="$(head -n 1 "$TUNNEL_PID_FILE" 2>/dev/null | tr -d '[:space:]')"
     [ -n "$pid" ] || return 1
     kill -0 "$pid" 2>/dev/null || { rm -f "$TUNNEL_PID_FILE"; return 1; }
+    if cmd="$(pid_cmdline "$pid")"; then
+        case "$cmd" in
+            *tunnel.py*) ;;
+            *) rm -f "$TUNNEL_PID_FILE"; return 1 ;;
+        esac
+    fi
     return 0
 }
 
@@ -291,7 +324,11 @@ port_in_use() {
 start_tunnel() {
     local py="$1"
     if tunnel_running; then
-        return 0
+        if port_in_use "$WEB_PORT"; then
+            return 0
+        fi
+        log "隧道进程存在但 ${WEB_PORT} 未监听，重启隧道"
+        stop_tunnel
     fi
     if [ -z "$py" ]; then
         log "缺少 python3，跳过隧道（仅 HTTP，可内网访问）"
@@ -320,6 +357,11 @@ stop_tunnel() {
     [ -f "$TUNNEL_PID_FILE" ] || return 0
     local pid i=0
     pid="$(head -n 1 "$TUNNEL_PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ! pid_matches "$pid" "*tunnel.py*"; then
+        log "tunnel.pid=${pid} 已不属于本应用，跳过"
+        rm -f "$TUNNEL_PID_FILE"
+        return 0
+    fi
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         log "stopping tunnel pid=${pid}"
         kill -TERM "$pid" 2>/dev/null || true
@@ -403,6 +445,12 @@ stop_app() {
     fi
     local pid i=0
     pid="$(head -n 1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]')"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+        && ! pid_matches "$pid" "*baidu-netdisk-rust*" && ! pid_matches "$pid" "*cmd/main*"; then
+        log "app.pid=${pid} 已不属于本应用，跳过"
+        rm -f "$PID_FILE"
+        return 0
+    fi
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         log "stopping pid=${pid}"
         kill -TERM "$pid" 2>/dev/null || true
