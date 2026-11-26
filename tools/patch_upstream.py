@@ -21,13 +21,13 @@ import pathlib
 
 MARK = "fnOS 封装补丁"          # 客户端超时补丁的标记
 MARK_SEND = "扫码长轮询 6s 无事件"   # 长轮询节流补丁的标记
-MARK_HANDLER = "扫码状态请求超过 90s"  # 处理器兜底的标记
+MARK_HANDLER = "同一个二维码只允许一个请求真正去打百度"  # 单飞补丁的标记
 
 TIMEOUTS = """
             // fnOS 封装补丁：登录客户端原本没有超时，出站连接被吞时会卡满内核
             // SYN 重试窗口（约 130s），表现为「首次扫码无反应，刷新后才正常」。
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30));"""
+            .timeout(std::time::Duration::from_secs(60));"""
 
 TARGETS = {
     "backend/src/auth/qrcode.rs": ".user_agent(USER_AGENT);",
@@ -36,44 +36,48 @@ TARGETS = {
 
 # 处理器层面兜底：不管卡在 DNS、连接、TLS 还是锁上，都要在 10 秒内给前端一个结果，
 # 这样前端 3 秒一次的轮询才能继续推进，而不是整个界面停在"等待扫码"。
-POLL = "backend/src/auth/qrcode.rs"
-POLL_ANCHOR = """        let resp = self
-            .client
-            .get(&url)
-            .send()
-            .await
-            .context("Failed to poll qrcode status")?;"""
-POLL_REPLACEMENT = """        // fnOS 封装补丁：/channel/unicast 是长轮询，没有事件时会挂住约 30 秒。
-        // 这里只约束"这一次网络等待"，超过 6 秒就当作"仍在等待"返回，让前端
-        // 立刻进入下一轮；确权与预热在拿到 v 之后才发生，不受此限制。
-        let resp = match tokio::time::timeout(
-            std::time::Duration::from_secs(6),
-            self.client.get(&url).send(),
-        )
-        .await
-        {
-            Ok(result) => result.context("Failed to poll qrcode status")?,
-            Err(_) => {
-                debug!("扫码长轮询 6s 无事件，按等待中返回");
-                return Ok(QRCodeStatus::Waiting);
-            }
-        };"""
-
 HANDLER = "backend/src/server/handlers/auth.rs"
 HANDLER_ANCHOR = "    match state.qrcode_auth.read().await.poll_status(&params.sign).await {"
-HANDLER_REPLACEMENT = """    // fnOS 封装补丁：仅作为兜底（90s），防止锁或网络病态卡死。
-    // 真正的长轮询节流在 poll_status 内部对单次 send() 做（6s），
-    // 这里绝不能用小值——用户确认登录后的取凭证与预热要花十几秒，
-    // 被这里掐断就会出现「手机点了登录，网页没反应」。
+HANDLER_REPLACEMENT = """    // fnOS 封装补丁：百度的 /channel/unicast 是长轮询，没有事件时会挂住约 30 秒，
+    // 而前端每 3 秒查一次，首屏就会叠出多个并发长轮询，界面长时间拿不到结果。
+    //
+    // 注意：**不能**用"短超时"来解决——把长轮询提前中断会把扫码事件丢掉，
+    // 表现就是「首次扫码没反应，刷新后才好」。
+    //
+    // 这里按 sign 做"单飞"：同一个二维码只允许一个请求真正去打百度，其余立刻
+    // 返回"等待中"；换了新二维码（sign 不同）立刻放行，所以刷新后不会被旧请求挡住。
+    // 另加 60 秒看门狗，仅防止病态卡死。
+    static QR_POLL_SIGN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    struct PollGuard<'a>(&'a str);
+    impl Drop for PollGuard<'_> {
+        fn drop(&mut self) {
+            if let Ok(mut guard) = QR_POLL_SIGN.lock() {
+                if guard.as_deref() == Some(self.0) {
+                    *guard = None;
+                }
+            }
+        }
+    }
+    {
+        let mut busy = match QR_POLL_SIGN.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if busy.as_deref() == Some(params.sign.as_str()) {
+            return Ok(Json(ApiResponse::success(QRCodeStatusResponse::Waiting)));
+        }
+        *busy = Some(params.sign.clone());
+    }
+    let _poll_guard = PollGuard(params.sign.as_str());
     let poll_result = match tokio::time::timeout(
-        std::time::Duration::from_secs(90),
+        std::time::Duration::from_secs(60),
         state.qrcode_auth.read().await.poll_status(&params.sign),
     )
     .await
     {
         Ok(result) => result,
         Err(_) => {
-            tracing::warn!("扫码状态请求超过 90s，按等待中返回");
+            tracing::warn!("扫码状态请求超过 60s，按等待中返回");
             Ok(crate::auth::QRCodeStatus::Waiting)
         }
     };
@@ -108,20 +112,9 @@ def main() -> int:
             raise SystemExit("缺少文件：%s" % target)
         print("%-40s %s" % (rel, patch_file(target, anchor)))
 
-    poll = root / POLL
-    text = poll.read_text(encoding="utf-8")
-    if MARK_SEND in text:
-        print("%-40s already" % (POLL + " (send)"))
-    elif text.count(POLL_ANCHOR) != 1:
-        raise SystemExit("补丁失败：%s 中 send() 锚点出现 %d 次，请人工核对"
-                         % (POLL, text.count(POLL_ANCHOR)))
-    else:
-        poll.write_text(text.replace(POLL_ANCHOR, POLL_REPLACEMENT), encoding="utf-8")
-        print("%-40s patched" % (POLL + " (send)"))
-
     handler = root / HANDLER
     text = handler.read_text(encoding="utf-8")
-    if MARK_HANDLER in text:
+    if "同一个二维码只允许一个请求" in text:
         print("%-40s already" % HANDLER)
     elif text.count(HANDLER_ANCHOR) != 1:
         raise SystemExit("补丁失败：%s 中锚点出现 %d 次，请人工核对"
